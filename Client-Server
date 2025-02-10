@@ -1,0 +1,200 @@
+##Client Code
+
+import java.io.*;
+import java.net.*;
+
+public class HubClient2 {
+    public static void main(String[] args) {
+        String serverAddress = "localhost";
+        int port = 7000;
+
+        try {
+            Socket socket = new Socket(serverAddress, port);
+            System.out.println("Connected to the server.");
+
+            BufferedReader serverReader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            BufferedWriter serverWriter = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
+            BufferedReader userInputReader = new BufferedReader(new InputStreamReader(System.in));
+
+            // Server listener thread
+            Thread serverListener = new Thread(() -> {
+                try {
+                    String serverMessage;
+                    while ((serverMessage = serverReader.readLine()) != null) {
+                        synchronized (System.out) { 
+                            System.out.println("\n[Server]: " + serverMessage);
+                             System.out.print("Enter command (SEND <client_no> <message> / GET / QUIT): ");
+                        }
+                    }
+                } catch (IOException e) {
+                    System.out.println("\nDisconnected from server.");
+                }
+            });
+            serverListener.start();
+
+            // Main thread to handle user input
+            while (true) {
+                // Ensure the prompt is printed once per user input
+//                System.out.print("Enter command (SEND <client_no> <message> / GET / QUIT): ");
+                String userMessage = userInputReader.readLine();
+
+                if (userMessage.equalsIgnoreCase("QUIT")) {
+                    serverWriter.write("quit\n");
+                    serverWriter.flush();
+                    System.out.println("Disconnected from server.");
+                    break;
+                }
+
+                serverWriter.write(userMessage + "\n");
+                serverWriter.flush();
+            }
+
+            // Cleanup
+            serverWriter.close();
+            serverReader.close();
+            socket.close();
+        } catch (IOException e) {
+            System.out.println("Error connecting to the server.");
+        }
+    }
+}
+
+##Server code
+
+import java.net.*;
+import java.io.*;
+
+class HandleClient extends Thread {
+    private Socket socket;
+    private int clientNo;
+    private BufferedReader bufferedReader;
+    private BufferedWriter bufferedWriter;
+
+    public HandleClient(Socket socket, int clientNo) {
+        this.socket = socket;
+        this.clientNo = clientNo;
+    }
+
+    public void run() {
+        try {
+            InputStreamReader reader = new InputStreamReader(socket.getInputStream());
+            bufferedReader = new BufferedReader(reader);
+            OutputStreamWriter writer = new OutputStreamWriter(socket.getOutputStream());
+            bufferedWriter = new BufferedWriter(writer);
+
+            // Register client streams
+            HubServer2.readers[clientNo] = bufferedReader;
+            HubServer2.writers[clientNo] = bufferedWriter;
+
+            // Send welcome message
+            bufferedWriter.write("Welcome! You are Client " + clientNo + "\n");
+            bufferedWriter.flush();
+
+            String message;
+            while ((message = bufferedReader.readLine()) != null) {
+                if (message.equalsIgnoreCase("quit")) {
+                    System.out.println("Client " + clientNo + " disconnected.");
+                    break;
+                }
+
+                if (message.equalsIgnoreCase("GET")) {
+                    String clientList = HubServer2.getConnectedClients();
+                    bufferedWriter.write("Connected clients: " + clientList + "\n");
+                    bufferedWriter.flush();
+                } 
+                else if (message.toUpperCase().startsWith("SEND")) {
+                    String[] parts = message.split(" ", 3);
+                    if (parts.length == 3) {
+                        try {
+                            int toClientNo = Integer.parseInt(parts[1]);
+                            String clientMessage = parts[2];
+                            System.out.println("Client " + clientNo + " to Client " + toClientNo + ": " + clientMessage);
+
+                            // Forward message to intended recipient
+                            if (HubServer2.writers[toClientNo] != null ) {
+                                HubServer2.sendMessage(toClientNo, "Client " + clientNo + ": " + clientMessage);
+                            } else {
+                                bufferedWriter.write("Client " + toClientNo + " is not connected.\n");
+                                bufferedWriter.flush();
+                            }
+                        } catch (NumberFormatException e) {
+                            bufferedWriter.write("Invalid client number!\n");
+                            bufferedWriter.flush();
+                        }
+                    } else {
+                        bufferedWriter.write("Invalid SEND format! Use: SEND <client_number> <message>\n");
+                        bufferedWriter.flush();
+                    }
+                } 
+                else {
+                    bufferedWriter.write("Invalid command! Use GET or SEND <client_number> <message>\n");
+                    bufferedWriter.flush();
+                }
+            }
+
+            // Clean up on client disconnection
+            socket.close();
+            HubServer2.readers[clientNo] = null;
+            HubServer2.writers[clientNo] = null;
+
+        } catch (IOException e) {
+            System.out.println("Client " + clientNo + " connection error.");
+        }
+    }
+}
+
+public class HubServer2 {
+    public static final int MAX_CLIENTS = 10;
+    public static BufferedReader[] readers = new BufferedReader[MAX_CLIENTS];
+    public static BufferedWriter[] writers = new BufferedWriter[MAX_CLIENTS];
+
+    public static void main(String[] args) throws IOException {
+        int port = 7000;
+        ServerSocket serverSocket = new ServerSocket(port);
+        System.out.println("Server started on port " + port);
+
+        int clientNo = 0;
+
+        while (true) {
+            Socket clientSocket = serverSocket.accept();
+            if (clientNo < MAX_CLIENTS) {
+                System.out.println("Client " + clientNo + " connected.");
+                HandleClient clientHandler = new HandleClient(clientSocket, clientNo);
+                clientHandler.start();
+                clientNo++;
+            } else {
+                System.out.println("Max clients reached. Connection refused.");
+                clientSocket.close();
+            }
+        }
+    }
+
+    public static void sendMessage(int toClientNo, String message) {
+        if (toClientNo >= 0 && toClientNo < MAX_CLIENTS) {
+            BufferedWriter writer = writers[toClientNo];
+            if (writer != null) {
+                try {
+                    writer.write(message + "\n");
+                    writer.flush();
+//                    System.out.println("Message sent to Client " + toClientNo + ": " + message);
+                } catch (IOException e) {
+                    System.out.println("Error sending message to client " + toClientNo);
+                }
+            } else {
+                System.out.println("Client " + toClientNo + " is not connected.");
+            }
+        } else {
+            System.out.println("Invalid client number: " + toClientNo);
+        }
+    }
+
+    public static String getConnectedClients() {
+        StringBuilder clientList = new StringBuilder();
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (writers[i] != null) {
+                clientList.append(i).append(" ");
+            }
+        }
+        return clientList.toString().trim();
+    }
+}
